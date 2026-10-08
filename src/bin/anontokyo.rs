@@ -22,8 +22,10 @@ const RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
 /// f32 slots in the capture->playback ring (~0.68 s of stereo 48k)
 const RING_SAMPLES: usize = 65_536;
-/// latency ceiling: playback trims the ring back down to this when above it
-const SOFT_CAP_SAMPLES: usize = 16_384;
+/// latency ceiling (f32 slots): only a real backlog (startup or clock drift)
+/// trims; must stay ABOVE steady-state occupancy (~24_576 slots = 12288 frames
+/// per 256 ms playback cycle) or it drops music every cycle and chops the audio
+const SOFT_CAP_SAMPLES: usize = 32_768;
 const STARTUP_SETTLE: Duration = Duration::from_millis(1500);
 const WATCHDOG_TICK: Duration = Duration::from_millis(200);
 
@@ -121,6 +123,9 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         // without this, linking to the then-default marks the stream "follow
         // default" and the later default switch drags it to our own sink
         *pw::keys::NODE_DONT_RECONNECT => "true",
+        // without an explicit latency PW sizes our buffers at 12288 frames
+        // and only calls process() every 256 ms: music arrives in lumps
+        *pw::keys::NODE_LATENCY => "1024/48000",
     };
     let playback_props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
@@ -128,6 +133,7 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         *pw::keys::MEDIA_ROLE => "Music",
         *pw::keys::TARGET_OBJECT => hw_sink.as_str(),
         *pw::keys::NODE_DONT_RECONNECT => "true",
+        *pw::keys::NODE_LATENCY => "1024/48000",
     };
 
     struct CapData {
@@ -139,6 +145,8 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         occupancy: Arc<AtomicU64>,
         health: Arc<Mutex<StreamHealth>>,
         dropped: u64,
+        cycles: u64,
+        logged: u64,
     }
 
     struct PlayData {
@@ -147,6 +155,10 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         scratch: Vec<f32>,
         trim: Vec<f32>,
         health: Arc<Mutex<StreamHealth>>,
+        cycles: u64,
+        logged: u64,
+        starved: u64,
+        trims: u64,
     }
 
     let capture = pw::stream::StreamBox::new(&core, "anontokyo-capture", capture_props)?;
@@ -161,6 +173,8 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         occupancy: occupancy.clone(),
         health: health.clone(),
         dropped: 0,
+        cycles: 0,
+        logged: 0,
     };
     let cap_listener = capture
         .add_local_listener_with_user_data(cap_data)
@@ -236,6 +250,14 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
             }
             let buf = &data.scratch[..needed];
             let occ = data.occupancy.load(Ordering::Relaxed);
+            data.cycles += 1;
+            if data.logged < 8 {
+                data.logged += 1;
+                log::info!("capture: frames={frames} occ={occ} cycle={}", data.cycles);
+            } else if data.cycles % 1000 == 0 {
+                // cadence probe: enable with RUST_LOG=debug
+                log::debug!("capture: frames={frames} occ={occ} cycle={}", data.cycles);
+            }
             if occ + needed as u64 <= RING_SAMPLES as u64 {
                 let mut pushed = 0usize;
                 for &s in buf {
@@ -265,6 +287,10 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         scratch: Vec::new(),
         trim: Vec::new(),
         health: health.clone(),
+        cycles: 0,
+        logged: 0,
+        starved: 0,
+        trims: 0,
     };
     let play_listener = playback
         .add_local_listener_with_user_data(play_data)
@@ -301,6 +327,10 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
             let occ = data.occupancy.load(Ordering::Relaxed);
             let excess = occ.saturating_sub(SOFT_CAP_SAMPLES as u64) as usize;
             if excess > 0 {
+                data.trims += 1;
+                if data.trims <= 5 || data.trims % 1000 == 0 {
+                    log::info!("trim: dropped {excess} slots (occ={occ}, #{})", data.trims);
+                }
                 data.trim.resize(excess, 0.0);
                 match data.consumer.pop() {
                     Ok(_) => {
@@ -328,6 +358,21 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
                 }
             }
             data.occupancy.fetch_sub(popped as u64, Ordering::Relaxed);
+
+            let starve = popped < max_frames * CHANNELS;
+            data.starved += starve as u64;
+            data.cycles += 1;
+            if data.logged < 8 {
+                data.logged += 1;
+                log::info!(
+                    "playback: quantum={max_frames} popped={popped} occ={occ}{}",
+                    if starve { " STARVED" } else { "" }
+                );
+            } else if starve && (data.starved <= 30 || data.starved % 500 == 1) {
+                log::warn!("playback starved: quantum={max_frames} popped={popped} occ={occ}");
+            } else if data.cycles % 1000 == 0 {
+                log::debug!("playback: quantum={max_frames} popped={popped} occ={occ}");
+            }
 
             let out_end = popped * 4;
             for (i, s) in data.scratch[..popped].iter().enumerate() {
