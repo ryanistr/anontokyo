@@ -136,27 +136,31 @@ impl ChainDef {
 
             match settings.eq_mode {
                 EqMode::Simple => {
-                    if let [low, mid, high] = &settings.simple_bands[..] {
-                        if low.gain_db.abs() > 0.01 {
+                    // ends are shelves, the middle bands are peaking filters
+                    let bands = &settings.simple_bands;
+                    let n = bands.len();
+                    for (i, band) in bands.iter().enumerate() {
+                        if band.gain_db.abs() <= 0.01 {
+                            continue;
+                        }
+                        if i == 0 && n > 1 {
                             stages.push(Biquad::low_shelf(
                                 sr,
-                                low.freq_hz as f64,
-                                low.gain_db as f64,
+                                band.freq_hz as f64,
+                                band.gain_db as f64,
                             ));
-                        }
-                        if mid.gain_db.abs() > 0.01 {
-                            stages.push(Biquad::peaking(
-                                sr,
-                                mid.freq_hz as f64,
-                                mid.gain_db as f64,
-                                mid.q as f64,
-                            ));
-                        }
-                        if high.gain_db.abs() > 0.01 {
+                        } else if i + 1 == n && n > 2 {
                             stages.push(Biquad::high_shelf(
                                 sr,
-                                high.freq_hz as f64,
-                                high.gain_db as f64,
+                                band.freq_hz as f64,
+                                band.gain_db as f64,
+                            ));
+                        } else {
+                            stages.push(Biquad::peaking(
+                                sr,
+                                band.freq_hz as f64,
+                                band.gain_db as f64,
+                                band.q as f64,
                             ));
                         }
                     }

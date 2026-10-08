@@ -4,7 +4,7 @@
 //! DSP -> ring buffer -> playback stream -> hardware sink.
 
 use anontokyo::ctl::{self, AudioFormat};
-use anontokyo::{ChainStates, Shared, admin, settings};
+use anontokyo::{ChainStates, Shared, admin, meter, settings};
 use anyhow::{Context, Result};
 use clap::Parser;
 use pipewire as pw;
@@ -144,6 +144,7 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         producer: rtrb::Producer<f32>,
         occupancy: Arc<AtomicU64>,
         health: Arc<Mutex<StreamHealth>>,
+        analyzer: meter::MeterAnalyzer,
         dropped: u64,
         cycles: u64,
         logged: u64,
@@ -172,6 +173,7 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
         producer,
         occupancy: occupancy.clone(),
         health: health.clone(),
+        analyzer: meter::MeterAnalyzer::new(shared.format.load().rate),
         dropped: 0,
         cycles: 0,
         logged: 0,
@@ -247,6 +249,8 @@ fn run(args: Args, shared: Arc<Shared>, graph: Rc<RefCell<admin::GraphSetup>>) -
                 }
                 let chain = data.shared.chain.load();
                 chain.process(&mut data.states, buf);
+                let levels = data.analyzer.analyze(buf, ch);
+                data.shared.meter.store(levels);
             }
             let buf = &data.scratch[..needed];
             let occ = data.occupancy.load(Ordering::Relaxed);

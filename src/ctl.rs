@@ -2,6 +2,7 @@
 //! server thread and client helper.
 
 use crate::chain::ChainDef;
+use crate::meter::Meter;
 use crate::settings::{self, BoostKind, EqMode, FxKind, Settings};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ pub struct Shared {
     pub settings: ArcSwap<Settings>,
     pub format: ArcSwap<AudioFormat>,
     pub chain: ArcSwap<ChainDef>,
+    pub meter: Meter,
     rebuild_lock: Mutex<()>,
     config_path: PathBuf,
 }
@@ -41,6 +43,7 @@ impl Shared {
             settings: arc_swap::ArcSwap::from_pointee(settings),
             format: arc_swap::ArcSwap::from_pointee(format),
             chain: arc_swap::ArcSwap::from_pointee(chain),
+            meter: Meter::new(),
             rebuild_lock: Mutex::new(()),
             config_path,
         })
@@ -106,6 +109,8 @@ impl Shared {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
+    /// current spectrum-meter band levels (visualizer)
+    Meter,
     SetBypass {
         enabled: bool,
     },
@@ -208,6 +213,13 @@ fn handle(shared: &Shared, req: Request) -> (Response, bool) {
             settings: None,
             status: Some(shared.status_line()),
             presets: settings::list_presets().ok(),
+        },
+        Request::Meter => Response {
+            ok: true,
+            error: None,
+            settings: None,
+            status: Some(serde_json::json!({ "bands": shared.meter.levels() })),
+            presets: None,
         },
         Request::SetBypass { enabled } => shared
             .update(|s| {
@@ -444,7 +456,11 @@ pub fn serve(
                             Ok(0) => continue,
                             Ok(_) => match serde_json::from_str::<Request>(line.trim()) {
                                 Ok(req) => {
-                                    log::info!("req: {req:?}");
+                                    if matches!(req, Request::Meter) {
+                                        log::debug!("req: {req:?}");
+                                    } else {
+                                        log::info!("req: {req:?}");
+                                    }
                                     handle(&shared, req)
                                 }
                                 Err(e) => (Response::err(format!("bad request: {e}")), false),

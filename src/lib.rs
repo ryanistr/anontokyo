@@ -6,6 +6,7 @@ pub mod chain;
 pub mod ctl;
 pub mod fac;
 pub mod factory;
+pub mod meter;
 pub mod settings;
 
 pub use chain::{ChainDef, ChainStates};

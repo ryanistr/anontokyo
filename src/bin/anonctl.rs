@@ -66,7 +66,7 @@ impl From<FxArg> for FxKind {
     }
 }
 
-/// low/mid/high = simple-mode bands, m<N> = multi-band index
+/// low..high = 5 simple bands, s<N> = simple index, m<N> = multi index
 #[derive(Clone)]
 struct BandArg {
     mode: EqMode,
@@ -82,25 +82,42 @@ impl std::str::FromStr for BandArg {
                 mode: EqMode::Simple,
                 index: 0,
             }),
-            "mid" => Ok(BandArg {
+            "lowmid" => Ok(BandArg {
                 mode: EqMode::Simple,
                 index: 1,
             }),
-            "high" => Ok(BandArg {
+            "mid" => Ok(BandArg {
                 mode: EqMode::Simple,
                 index: 2,
             }),
+            "highmid" => Ok(BandArg {
+                mode: EqMode::Simple,
+                index: 3,
+            }),
+            "high" => Ok(BandArg {
+                mode: EqMode::Simple,
+                index: 4,
+            }),
             other => {
+                let usage = "use low|lowmid|mid|highmid|high|s<index>|m<index>";
                 if let Some(rest) = other.strip_prefix('m') {
                     let idx: usize = rest
                         .parse()
-                        .map_err(|_| format!("bad band '{s}' (use low|mid|high|m<index>)"))?;
+                        .map_err(|_| format!("bad band '{s}' ({usage})"))?;
                     Ok(BandArg {
                         mode: EqMode::Multi,
                         index: idx,
                     })
+                } else if let Some(rest) = other.strip_prefix('s') {
+                    let idx: usize = rest
+                        .parse()
+                        .map_err(|_| format!("bad band '{s}' ({usage})"))?;
+                    Ok(BandArg {
+                        mode: EqMode::Simple,
+                        index: idx,
+                    })
                 } else {
-                    Err(format!("bad band '{s}' (use low|mid|high|m<index>)"))
+                    Err(format!("bad band '{s}' ({usage})"))
                 }
             }
         }
@@ -167,14 +184,14 @@ enum Cmd {
     /// stop the daemon (restores the previous default sink)
     Stop,
     /// send a raw JSON request (escape hatch)
-    Raw { json: String },
+    Raw { payload: String },
 }
 
 #[derive(Subcommand)]
 enum EqCmd {
-    /// switch EQ mode: simple (3 band) or multi (N band)
+    /// switch EQ mode: simple (5 band) or multi (N band)
     Mode { mode: EqModeArg },
-    /// set a band: anonctl eq set low|mid|high|m<index> --gain 3 --freq 900 --q 1.5
+    /// set a band: anonctl eq set low|lowmid|mid|highmid|high|m<index> --gain 3 --freq 900 --q 1.5
     #[command(allow_negative_numbers = true)]
     Set {
         band: BandArg,
@@ -220,10 +237,14 @@ fn summarize(s: &Settings) -> String {
         }
     };
     let eq = match s.eq_mode {
-        EqMode::Simple => format!(
-            "simple({:+.1}/{:+.1}/{:+.1})",
-            s.simple_bands[0].gain_db, s.simple_bands[1].gain_db, s.simple_bands[2].gain_db
-        ),
+        EqMode::Simple => {
+            let gains: Vec<String> = s
+                .simple_bands
+                .iter()
+                .map(|b| format!("{:+.1}", b.gain_db))
+                .collect();
+            format!("simple({})", gains.join("/"))
+        }
         EqMode::Multi => {
             let active = s
                 .multi_bands
@@ -334,18 +355,14 @@ fn human_status(status: &serde_json::Value, presets: Option<&[String]>) -> Strin
     let eq = match settings.eq_mode {
         EqMode::Simple => {
             let sb = &settings.simple_bands;
-            if sb.len() >= 3 {
-                format!(
-                    "simple · low {:+.1} @{} Hz · mid {:+.1} @{} Hz · high {:+.1} @{} Hz",
-                    sb[0].gain_db,
-                    fmt_hz(sb[0].freq_hz),
-                    sb[1].gain_db,
-                    fmt_hz(sb[1].freq_hz),
-                    sb[2].gain_db,
-                    fmt_hz(sb[2].freq_hz)
-                )
-            } else {
+            if sb.is_empty() {
                 "simple".into()
+            } else {
+                let parts: Vec<String> = sb
+                    .iter()
+                    .map(|b| format!("{:+.1} @{} Hz", b.gain_db, fmt_hz(b.freq_hz)))
+                    .collect();
+                format!("simple · {}", parts.join(" · "))
             }
         }
         EqMode::Multi => {
@@ -560,9 +577,9 @@ fn main() -> Result<()> {
         Cmd::Presets => Request::ListPresets,
         Cmd::Describe => Request::Describe,
         Cmd::Stop => Request::Stop,
-        Cmd::Raw { json } => {
-            let req: Request =
-                serde_json::from_str(json).map_err(|e| anyhow::anyhow!("bad request JSON: {e}"))?;
+        Cmd::Raw { payload } => {
+            let req: Request = serde_json::from_str(payload)
+                .map_err(|e| anyhow::anyhow!("bad request JSON: {e}"))?;
             req
         }
     };

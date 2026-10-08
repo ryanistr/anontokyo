@@ -13,7 +13,7 @@ pub const PREAMP_MIN: f32 = -24.0;
 pub const PREAMP_MAX: f32 = 12.0;
 pub const Q_MIN: f32 = 0.1;
 pub const Q_MAX: f32 = 30.0;
-pub const SIMPLE_BANDS: usize = 3;
+pub const SIMPLE_BANDS: usize = 5;
 pub const MULTI_BANDS_MIN: usize = 1;
 pub const MULTI_BANDS_MAX: usize = 32;
 
@@ -161,7 +161,9 @@ fn default_treble() -> Boost {
 fn default_simple_bands() -> Vec<Band> {
     vec![
         Band::new(120.0, 0.0, 0.7),  // low shelf
+        Band::new(400.0, 0.0, 1.0),  // peaking
         Band::new(1000.0, 0.0, 1.0), // peaking (mid)
+        Band::new(2500.0, 0.0, 1.0), // peaking
         Band::new(8000.0, 0.0, 0.7), // high shelf
     ]
 }
@@ -234,11 +236,10 @@ impl Settings {
         self.ambience = self.ambience.sanitized();
         self.dynamic_boost = self.dynamic_boost.sanitized();
         self.bass_boost = self.bass_boost.sanitized();
-        while self.simple_bands.len() < SIMPLE_BANDS {
-            let defaults = default_simple_bands();
-            self.simple_bands.push(defaults[self.simple_bands.len()]);
+        // old 3-band configs don't map onto the 5-band layout: rebuild flat
+        if self.simple_bands.len() != SIMPLE_BANDS {
+            self.simple_bands = default_simple_bands();
         }
-        self.simple_bands.truncate(SIMPLE_BANDS);
         for b in &mut self.simple_bands {
             *b = b.sanitized();
         }
@@ -380,7 +381,10 @@ impl Settings {
         let mut simple_controls = vec![
             serde_json::json!({"key": "eq_mode", "type": "enum", "values": ["simple", "multi"]}),
         ];
-        for (i, name) in ["low", "mid", "high"].iter().enumerate() {
+        for (i, name) in ["low", "low-mid", "mid", "high-mid", "high"]
+            .iter()
+            .enumerate()
+        {
             simple_controls.push(slider(
                 &format!("simple_bands.{i}.freq_hz"),
                 FREQ_MIN,
