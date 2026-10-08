@@ -3,6 +3,8 @@
 //! Graph: apps -> [anontokyo.in null sink] -> capture stream (monitor) ->
 //! DSP -> ring buffer -> playback stream -> hardware sink.
 
+use anontokyo::ctl::{self, AudioFormat};
+use anontokyo::{ChainStates, Shared, admin, settings};
 use anyhow::{Context, Result};
 use clap::Parser;
 use pipewire as pw;
@@ -15,8 +17,6 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use anontokyo::ctl::{self, AudioFormat};
-use anontokyo::{ChainStates, Shared, admin, settings};
 
 const RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
@@ -44,7 +44,6 @@ struct Args {
     /// do not switch the system default sink to the virtual sink
     #[arg(long)]
     no_default_switch: bool,
-
 }
 
 #[derive(Default)]
