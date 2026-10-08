@@ -6,6 +6,8 @@ use anontokyo::settings::{BoostKind, EqMode, FxKind};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
@@ -25,6 +27,17 @@ fn fmt_freq(hz: f64) -> SharedString {
         format!("{:.0}Hz", hz).into()
     }
 }
+
+fn spawn_daemon() -> Arc<Mutex<Option<Child>>> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let child = Command::new(cwd.join("target/release/anontokyo"))
+        .spawn()
+        .or_else(|_| Command::new("anontokyo").spawn())
+        .unwrap_or_else(|_| Command::new("target/release/anontokyo").spawn().expect("failed to spawn daemon"));
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    Arc::new(Mutex::new(Some(child)))
+}
+
 
 /// Pull a status snapshot from the daemon into the UI. Returns false when the
 /// daemon is unreachable.
@@ -140,6 +153,7 @@ fn boost_kind(idx: i32) -> BoostKind {
 
 fn main() -> Result<(), slint::PlatformError> {
     env_logger::init();
+    let daemon = spawn_daemon();
     let ui = MainWindow::new()?;
     if std::env::args().any(|a| a == "--advanced") {
         ui.set_open_advanced(true);
@@ -306,5 +320,12 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
 
-    ui.run()
+    let res = ui.run();
+    if let Ok(mut d) = daemon.lock() {
+        if let Some(ref mut c) = d.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+    res
 }
