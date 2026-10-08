@@ -109,23 +109,20 @@ export component MainWindow inherits MaterialWindow {
                 }
             }
 
-            Rectangle {
+            HorizontalLayout {
                 x: logo.x + logo.width + MaterialStyleMetrics.padding_12;
-                width: anon_t.width + tokyo_t.width;
                 height: parent.height;
+                spacing: 0px;
+                alignment: center;
 
                 anon_t := Text {
                     text: "Anon";
-                    x: 0px;
-                    y: (parent.height - self.height) / 2;
                     color: MaterialPalette.on_surface;
                     font_size: MaterialTypography.title_large.font_size;
                     font_weight: MaterialTypography.medium;
                 }
                 tokyo_t := Text {
                     text: "Tokyo";
-                    x: anon_t.width;
-                    y: (parent.height - self.height) / 2;
                     color: MaterialPalette.primary;
                     font_size: MaterialTypography.title_large.font_size;
                     font_weight: MaterialTypography.semibold;
