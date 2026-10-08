@@ -2,13 +2,15 @@
 
 Fully-Rust system-wide audio effects daemon for PipeWire: Bass / Vocal / Treble
 boost toggles combined with a customizable EQ (simple 3-band or multi-band up
-to 20 bands), presets, preamp, and a soft limiter. Functions first — the GUI
-comes later; everything is driven by `anonctl`.
+to 32 bands), five FxSound-style boost sliders (clarity, ambience, surround,
+dynamic boost, bass boost), presets including the 12 official FxSound factory
+presets, preamp, and a soft limiter. Functions first — the GUI comes later;
+everything is driven by `anonctl` and described by a machine-readable schema.
 
 ## Build & test
 
     cargo build --release
-    cargo test            # 25 unit tests (DSP math, settings, control protocol)
+    cargo test            # 45 unit tests (DSP math, settings, presets, protocol)
 
 ## Run
 
@@ -35,15 +37,44 @@ Wiring requirements learned the hard way (WirePlumber 0.5.18 policy):
     anonctl bypass on|off               hard bypass (bit-exact passthrough)
     anonctl preamp --db -3              -12..+12 dB (negative values accepted)
     anonctl boost bass|vocal|treble --enable|--disable --gain -6 --freq 150 --q 0.7
+    anonctl fx clarity|surround|ambience|dynamic-boost|bass-boost
+                                        --enable|--disable --amount 0..100
     anonctl eq mode simple|multi
     anonctl eq set low|mid|high --gain -6 --freq 120        simple mode
-    anonctl eq set m0..m19 --gain 6 --freq 500 --q 1.4      multi mode
-    anonctl eq count 4..20              multi band count at runtime
-    anonctl preset save|load|delete <name>; anonctl presets
+    anonctl eq set m0..m31 --gain 6 --freq 500 --q 1.4      multi mode
+    anonctl eq count 4..32              multi band count at runtime
+    anonctl preset save|load|delete|rename <name>; anonctl presets
+    anonctl preset import <file.fac>    convert a FxSound preset to a user preset
+    anonctl describe                    JSON control schema for the future GUI
 
-Chain order: preamp -> bass -> vocal -> treble -> EQ (mode-dependent) -> soft
-limiter (knee 0.85, ceiling 0.999 = -0.009 dBFS). DSP: RBJ Audio-EQ-Cookbook
-biquads, f64 coefficients / f32 samples, lock-free settings swap via arc-swap.
+Chain order: preamp -> clarity -> bass-boost slider -> bass -> vocal -> treble
+-> EQ (mode-dependent) -> dynamic boost -> surround -> ambience -> soft limiter
+(knee 0.85, ceiling 0.999 = -0.009 dBFS). DSP: RBJ Audio-EQ-Cookbook biquads,
+f64 coefficients / f32 samples, lock-free settings swap via arc-swap.
+
+## FxSound-style effects
+
+Five continuous 0..100 sliders that stack with (never replace) the three boost
+toggles; the parameter model mirrors FxSound's (5 effect slots + on/off +
+10-band graphic EQ in presets):
+
+| slider        | DSP                                        | amount 100  |
+|---------------|--------------------------------------------|-------------|
+| clarity       | peaking @ 4 kHz (FxSound "Fidelity")       | +9 dB       |
+| bass-boost    | low shelf @ 100 Hz (separate from `boost bass`) | +12 dB  |
+| dynamic-boost | upward compressor, target -26 dB, 5/150 ms envelope | up to +12 dB |
+| surround      | M/S stereo width                           | 2x side     |
+| ambience      | 4-tap early reflections (17/29/41/53 ms, right channel stretched) | wet 0.35 |
+
+Presets follow FxSound's split: the 12 factory presets ship as their original
+`.fac` files (`presets-fx/`, parsed at load time) and are always available;
+user presets in `~/.config/anontokyo/presets/` shadow factory presets of the
+same name and are the only ones that can be deleted or renamed. `preset
+import` converts any other FxSound `.fac` file. Factory preset values derive
+from the FxSound project (https://github.com/fxsoundapp/fxsound).
+
+`anonctl --json describe` returns groups/keys/types/ranges for every control,
+so a future GUI builds its widgets from data instead of hardcoded constants.
 
 ## Verified end-to-end (48 kHz live graph, hw monitor recordings)
 
@@ -58,6 +89,8 @@ biquads, f64 coefficients / f32 samples, lock-free settings swap via arc-swap.
 | bass+low stacked                  | +8.31 dB | +8.29     | 0.017  |
 | preamp -3                         | -3.00 dB | -3.00     | 0.001  |
 | bypass on                         | exact baseline           | 0.000 |        |
+| bass-boost slider 100 -> 100 Hz corner | +6.09 dB            | +6.00 | 0.09   |
+| flat after fx-era rework (both runs) | exact match to source   | 0.000 |        |
 | limiter, +20.7 dB over 0 dBFS in  | -0.0085 dB (ceiling)     | cap   | 0.0002 |
 
 (A/B recordings also caught real app audio — Zen/YouTube — flowing through the
@@ -65,5 +98,7 @@ chain into the hardware sink, confirming system-wide routing.)
 
 ## Config
 
-`~/.config/anontokyo/config.toml` (persisted on every change) and presets at
-`~/.config/anontokyo/presets/<name>.toml`.
+`~/.config/anontokyo/config.toml` (persisted on every change) and user presets
+at `~/.config/anontokyo/presets/<name>.toml`; factory presets live in
+`presets-fx/` inside the repo and are embedded in the binary. Configs written
+before the fx fields existed still load (missing fields default to off/0).

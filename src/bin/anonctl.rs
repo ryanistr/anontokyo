@@ -1,9 +1,9 @@
 //! anonctl — command-line control for the anontokyo daemon.
 
+use anontokyo::ctl::{self, Request, Response};
+use anontokyo::settings::{BoostKind, EqMode, FxKind, Settings};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use anontokyo::ctl::{self, Request, Response};
-use anontokyo::settings::{BoostKind, EqMode, Settings};
 
 #[derive(Parser)]
 #[command(name = "anonctl", about = "Control the AnonTokyo audio daemon")]
@@ -41,6 +41,27 @@ impl From<BoostArg> for BoostKind {
             BoostArg::Bass => BoostKind::Bass,
             BoostArg::Vocal => BoostKind::Vocal,
             BoostArg::Treble => BoostKind::Treble,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy)]
+enum FxArg {
+    Clarity,
+    Surround,
+    Ambience,
+    DynamicBoost,
+    BassBoost,
+}
+
+impl From<FxArg> for FxKind {
+    fn from(v: FxArg) -> FxKind {
+        match v {
+            FxArg::Clarity => FxKind::Clarity,
+            FxArg::Surround => FxKind::Surround,
+            FxArg::Ambience => FxKind::Ambience,
+            FxArg::DynamicBoost => FxKind::DynamicBoost,
+            FxArg::BassBoost => FxKind::BassBoost,
         }
     }
 }
@@ -116,6 +137,19 @@ enum Cmd {
         #[arg(long, allow_hyphen_values = true)]
         q: Option<f32>,
     },
+    /// change one of the five FxSound-style slider effects
+    Fx {
+        which: FxArg,
+        /// enable this effect
+        #[arg(long)]
+        enable: bool,
+        /// disable this effect
+        #[arg(long)]
+        disable: bool,
+        /// slider amount 0..100
+        #[arg(long)]
+        amount: Option<f32>,
+    },
     /// EQ section
     Eq {
         #[command(subcommand)]
@@ -128,6 +162,8 @@ enum Cmd {
     },
     /// list saved presets
     Presets,
+    /// print the control schema (for building a GUI)
+    Describe,
     /// stop the daemon (restores the previous default sink)
     Stop,
     /// send a raw JSON request (escape hatch)
@@ -167,6 +203,12 @@ enum PresetCmd {
     Save { name: String },
     /// load a preset (applied + persisted as the active config)
     Load { name: String },
+    /// delete a saved preset (built-in presets are protected)
+    Delete { name: String },
+    /// rename a saved preset
+    Rename { from: String, to: String },
+    /// import a FxSound .fac preset file as a user preset
+    Import { path: String },
 }
 
 fn summarize(s: &Settings) -> String {
@@ -191,8 +233,25 @@ fn summarize(s: &Settings) -> String {
             format!("multi({} bands, {} touched)", s.multi_bands.len(), active)
         }
     };
+    let mut fx = Vec::new();
+    for (name, e) in [
+        ("clr", &s.clarity),
+        ("sur", &s.surround),
+        ("amb", &s.ambience),
+        ("dyn", &s.dynamic_boost),
+        ("bass", &s.bass_boost),
+    ] {
+        if e.enabled {
+            fx.push(format!("{name}{}", e.amount.round()));
+        }
+    }
+    let fx_part = if fx.is_empty() {
+        String::new()
+    } else {
+        format!(" fx({})", fx.join(" "))
+    };
     format!(
-        "bypass={} preamp={:+.1}dB limiter={} {} {} {} eq={} ",
+        "bypass={} preamp={:+.1}dB limiter={} {} {} {} eq={}{} ",
         if s.bypass { "on" } else { "off" },
         s.preamp_db,
         if s.limiter { "on" } else { "off" },
@@ -200,6 +259,7 @@ fn summarize(s: &Settings) -> String {
         boost("vocal", &s.vocal),
         boost("treble", &s.treble),
         eq,
+        fx_part,
     )
     .trim()
     .to_string()
@@ -269,6 +329,27 @@ fn main() -> Result<()> {
                 q: *q,
             }
         }
+        Cmd::Fx {
+            which,
+            enable,
+            disable,
+            amount,
+        } => {
+            if *enable == *disable && amount.is_none() {
+                bail!("give one of --enable/--disable/--amount");
+            }
+            Request::SetFx {
+                which: (*which).into(),
+                enabled: if *enable {
+                    Some(true)
+                } else if *disable {
+                    Some(false)
+                } else {
+                    None
+                },
+                amount: *amount,
+            }
+        }
         Cmd::Eq { cmd } => match cmd {
             EqCmd::Mode { mode } => Request::SetEqMode {
                 mode: match mode {
@@ -299,8 +380,15 @@ fn main() -> Result<()> {
         Cmd::Preset { cmd } => match cmd {
             PresetCmd::Save { name } => Request::SavePreset { name: name.clone() },
             PresetCmd::Load { name } => Request::LoadPreset { name: name.clone() },
+            PresetCmd::Delete { name } => Request::DeletePreset { name: name.clone() },
+            PresetCmd::Rename { from, to } => Request::RenamePreset {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            PresetCmd::Import { path } => Request::ImportPreset { path: path.clone() },
         },
         Cmd::Presets => Request::ListPresets,
+        Cmd::Describe => Request::Describe,
         Cmd::Stop => Request::Stop,
         Cmd::Raw { json } => {
             let req: Request =

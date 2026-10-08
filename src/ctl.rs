@@ -2,7 +2,7 @@
 //! server thread and client helper.
 
 use crate::chain::ChainDef;
-use crate::settings::{self, BoostKind, EqMode, Settings};
+use crate::settings::{self, BoostKind, EqMode, FxKind, Settings};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -135,13 +135,33 @@ pub enum Request {
     SetBandCount {
         count: usize,
     },
+    SetFx {
+        which: FxKind,
+        enabled: Option<bool>,
+        amount: Option<f32>,
+    },
     SavePreset {
         name: String,
     },
     LoadPreset {
         name: String,
     },
+    /// remove a user preset (built-in factory presets are protected)
+    DeletePreset {
+        name: String,
+    },
+    /// rename a user preset
+    RenamePreset {
+        from: String,
+        to: String,
+    },
+    /// import a FxSound `.fac` preset file as a user preset
+    ImportPreset {
+        path: String,
+    },
     ListPresets,
+    /// static control schema, for building a GUI
+    Describe,
     Stop,
 }
 
@@ -235,6 +255,23 @@ fn handle(shared: &Shared, req: Request) -> (Response, bool) {
             })
             .map(Response::ok_settings)
             .unwrap_or_else(Response::err),
+        Request::SetFx {
+            which,
+            enabled,
+            amount,
+        } => shared
+            .update(|s| {
+                let f = s.fx_mut(which);
+                if let Some(v) = enabled {
+                    f.enabled = v;
+                }
+                if let Some(v) = amount {
+                    f.amount = v;
+                }
+                Ok(())
+            })
+            .map(Response::ok_settings)
+            .unwrap_or_else(Response::err),
         Request::SetEqMode { mode } => shared
             .update(|s| {
                 s.eq_mode = mode;
@@ -287,6 +324,52 @@ fn handle(shared: &Shared, req: Request) -> (Response, bool) {
                 .map(Response::ok_settings)
                 .unwrap_or_else(Response::err),
             Err(e) => Response::err(e),
+        },
+        Request::DeletePreset { name } => match settings::delete_preset(&name) {
+            Ok(()) => Response {
+                ok: true,
+                error: None,
+                settings: None,
+                status: Some(serde_json::json!({ "deleted": name })),
+                presets: None,
+            },
+            Err(e) => Response::err(e),
+        },
+        Request::RenamePreset { from, to } => match settings::rename_preset(&from, &to) {
+            Ok(()) => Response {
+                ok: true,
+                error: None,
+                settings: None,
+                status: Some(serde_json::json!({ "renamed": { "from": from, "to": to } })),
+                presets: None,
+            },
+            Err(e) => Response::err(e),
+        },
+        Request::ImportPreset { path } => {
+            let result = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {path}: {e}"))
+                .and_then(|text| {
+                    let preset = crate::fac::parse_fac(&text)?;
+                    settings::save_preset(&preset.name, &preset.to_settings())?;
+                    Ok(preset.name)
+                });
+            match result {
+                Ok(name) => Response {
+                    ok: true,
+                    error: None,
+                    settings: None,
+                    status: Some(serde_json::json!({ "imported": name })),
+                    presets: None,
+                },
+                Err(e) => Response::err(e),
+            }
+        }
+        Request::Describe => Response {
+            ok: true,
+            error: None,
+            settings: None,
+            status: Some(Settings::describe()),
+            presets: None,
         },
         Request::ListPresets => match settings::list_presets() {
             Ok(presets) => Response {
@@ -360,7 +443,10 @@ pub fn serve(
                         let (resp, stop) = match read {
                             Ok(0) => continue,
                             Ok(_) => match serde_json::from_str::<Request>(line.trim()) {
-                                Ok(req) => handle(&shared, req),
+                                Ok(req) => {
+                                    log::info!("req: {req:?}");
+                                    handle(&shared, req)
+                                }
                                 Err(e) => (Response::err(format!("bad request: {e}")), false),
                             },
                             Err(_) => continue,
@@ -493,6 +579,120 @@ mod tests {
     }
 
     #[test]
+    fn set_fx_toggles_and_clamps() {
+        let shared = test_shared("ctl-fx");
+        let (resp, _) = handle(
+            &shared,
+            Request::SetFx {
+                which: FxKind::Clarity,
+                enabled: Some(true),
+                amount: Some(500.0),
+            },
+        );
+        assert!(resp.ok, "{resp:?}");
+        let s = resp.settings.unwrap();
+        assert!(s.clarity.enabled);
+        assert_eq!(s.clarity.amount, settings::AMOUNT_MAX);
+        assert!(!shared.chain.load().stages.is_empty());
+
+        let (resp, _) = handle(
+            &shared,
+            Request::SetFx {
+                which: FxKind::DynamicBoost,
+                enabled: Some(true),
+                amount: Some(40.0),
+            },
+        );
+        assert!(resp.ok);
+        assert!(shared.chain.load().dyn_boost.is_some());
+        let (resp, _) = handle(
+            &shared,
+            Request::SetFx {
+                which: FxKind::Surround,
+                enabled: Some(true),
+                amount: Some(80.0),
+            },
+        );
+        assert!(resp.ok);
+        assert!((shared.chain.load().surround_width - 1.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn import_fac_preset_roundtrip() {
+        let shared = test_shared("ctl-import");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!("ctl-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // unique name so the test never touches a real user preset
+        let fac: String = include_str!("../presets-fx/1.fac")
+            .lines()
+            .enumerate()
+            .map(|(i, l)| if i == 2 { "ctl-import-test" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = dir.join("in.fac");
+        std::fs::write(&path, fac).unwrap();
+        let _ = settings::delete_preset("ctl-import-test");
+
+        let (resp, _) = handle(
+            &shared,
+            Request::ImportPreset {
+                path: path.display().to_string(),
+            },
+        );
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.status.unwrap()["imported"], "ctl-import-test");
+        let loaded = settings::load_preset("ctl-import-test").unwrap();
+        assert!(loaded.clarity.enabled);
+        assert_eq!(loaded.clarity.amount, 39.0);
+
+        let _ = settings::delete_preset("ctl-import-test");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn factory_presets_are_protected_from_delete_and_rename() {
+        let shared = test_shared("ctl-factory");
+        if settings::presets_dir().join("General.toml").exists() {
+            return; // never touch a real user override
+        }
+        let (resp, _) = handle(
+            &shared,
+            Request::DeletePreset {
+                name: "General".into(),
+            },
+        );
+        assert!(!resp.ok);
+        let (resp, _) = handle(
+            &shared,
+            Request::RenamePreset {
+                from: "General".into(),
+                to: "G2".into(),
+            },
+        );
+        assert!(!resp.ok);
+        let (resp, _) = handle(
+            &shared,
+            Request::LoadPreset {
+                name: "General".into(),
+            },
+        );
+        assert!(resp.ok, "factory load must still work: {resp:?}");
+        assert!(resp.settings.unwrap().clarity.enabled);
+    }
+
+    #[test]
+    fn describe_returns_control_schema() {
+        let shared = test_shared("ctl-describe");
+        let (resp, _) = handle(&shared, Request::Describe);
+        assert!(resp.ok);
+        let d = resp.status.unwrap();
+        assert_eq!(d["version"], 1);
+        assert_eq!(d["groups"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
     fn json_roundtrip_of_every_request() {
         let reqs = vec![
             Request::Status,
@@ -523,6 +723,20 @@ mod tests {
             Request::LoadPreset {
                 name: "bass".into(),
             },
+            Request::SetFx {
+                which: FxKind::Ambience,
+                enabled: Some(true),
+                amount: Some(70.0),
+            },
+            Request::DeletePreset { name: "old".into() },
+            Request::RenamePreset {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            Request::ImportPreset {
+                path: "/tmp/x.fac".into(),
+            },
+            Request::Describe,
             Request::ListPresets,
             Request::Stop,
         ];

@@ -33,6 +33,50 @@ pub enum BoostKind {
     Treble,
 }
 
+/// Which FxSound-style slider effect to control.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FxKind {
+    Clarity,
+    Surround,
+    Ambience,
+    DynamicBoost,
+    BassBoost,
+}
+
+pub const AMOUNT_MIN: f32 = 0.0;
+pub const AMOUNT_MAX: f32 = 100.0;
+
+/// One FxSound-style effect: on/off toggle plus a continuous 0..100 slider. The five
+/// of these stack alongside (not instead of) the bass/vocal/treble boost sections.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fx {
+    pub enabled: bool,
+    pub amount: f32,
+}
+
+impl Fx {
+    pub fn new(enabled: bool, amount: f32) -> Self {
+        Fx { enabled, amount }
+    }
+
+    fn sanitized(&self) -> Self {
+        Fx {
+            enabled: self.enabled,
+            amount: self.amount.clamp(AMOUNT_MIN, AMOUNT_MAX),
+        }
+    }
+}
+
+impl Default for Fx {
+    fn default() -> Self {
+        Fx {
+            enabled: false,
+            amount: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Band {
     pub freq_hz: f32,
@@ -145,6 +189,16 @@ pub struct Settings {
     pub simple_bands: Vec<Band>,
     /// N peaking bands, count adjustable at runtime.
     pub multi_bands: Vec<Band>,
+    /// Fidelity: presence/detail lift (peaking).
+    pub clarity: Fx,
+    /// Stereo width enhancement.
+    pub surround: Fx,
+    /// Early-reflection ambience.
+    pub ambience: Fx,
+    /// Upward-compressor lift for quiet material.
+    pub dynamic_boost: Fx,
+    /// Low-shelf bass boost slider; stacks with the `bass` boost section.
+    pub bass_boost: Fx,
 }
 
 impl Default for Settings {
@@ -159,6 +213,11 @@ impl Default for Settings {
             eq_mode: EqMode::Simple,
             simple_bands: default_simple_bands(),
             multi_bands: default_multi_bands(),
+            clarity: Fx::default(),
+            surround: Fx::default(),
+            ambience: Fx::default(),
+            dynamic_boost: Fx::default(),
+            bass_boost: Fx::default(),
         }
     }
 }
@@ -170,6 +229,11 @@ impl Settings {
         self.bass = self.bass.sanitized();
         self.vocal = self.vocal.sanitized();
         self.treble = self.treble.sanitized();
+        self.clarity = self.clarity.sanitized();
+        self.surround = self.surround.sanitized();
+        self.ambience = self.ambience.sanitized();
+        self.dynamic_boost = self.dynamic_boost.sanitized();
+        self.bass_boost = self.bass_boost.sanitized();
         while self.simple_bands.len() < SIMPLE_BANDS {
             let defaults = default_simple_bands();
             self.simple_bands.push(defaults[self.simple_bands.len()]);
@@ -247,6 +311,119 @@ impl Settings {
             BoostKind::Treble => &mut self.treble,
         }
     }
+
+    pub fn fx(&self, kind: FxKind) -> &Fx {
+        match kind {
+            FxKind::Clarity => &self.clarity,
+            FxKind::Surround => &self.surround,
+            FxKind::Ambience => &self.ambience,
+            FxKind::DynamicBoost => &self.dynamic_boost,
+            FxKind::BassBoost => &self.bass_boost,
+        }
+    }
+
+    pub fn fx_mut(&mut self, kind: FxKind) -> &mut Fx {
+        match kind {
+            FxKind::Clarity => &mut self.clarity,
+            FxKind::Surround => &mut self.surround,
+            FxKind::Ambience => &mut self.ambience,
+            FxKind::DynamicBoost => &mut self.dynamic_boost,
+            FxKind::BassBoost => &mut self.bass_boost,
+        }
+    }
+
+    /// Static control schema for a future GUI: every widget it should build, with ranges.
+    /// Values themselves come from `status`/`--json settings`.
+    pub fn describe() -> serde_json::Value {
+        fn tog(key: &str) -> serde_json::Value {
+            serde_json::json!({"key": key, "type": "toggle"})
+        }
+        fn slider(key: &str, min: f32, max: f32, step: f32, unit: &str) -> serde_json::Value {
+            serde_json::json!({"key": key, "type": "slider", "min": min, "max": max, "step": step, "unit": unit})
+        }
+        let mut boost_controls = Vec::new();
+        for sec in ["bass", "vocal", "treble"] {
+            boost_controls.push(tog(&format!("{sec}.enabled")));
+            boost_controls.push(slider(
+                &format!("{sec}.gain_db"),
+                BOOST_GAIN_MIN,
+                BOOST_GAIN_MAX,
+                0.5,
+                "dB",
+            ));
+            boost_controls.push(slider(
+                &format!("{sec}.freq_hz"),
+                FREQ_MIN,
+                FREQ_MAX,
+                1.0,
+                "Hz",
+            ));
+            boost_controls.push(slider(&format!("{sec}.q"), Q_MIN, Q_MAX, 0.1, ""));
+        }
+        let mut fx_controls = Vec::new();
+        for key in [
+            "clarity",
+            "surround",
+            "ambience",
+            "dynamic_boost",
+            "bass_boost",
+        ] {
+            fx_controls.push(tog(&format!("{key}.enabled")));
+            fx_controls.push(slider(
+                &format!("{key}.amount"),
+                AMOUNT_MIN,
+                AMOUNT_MAX,
+                1.0,
+                "%",
+            ));
+        }
+        let mut simple_controls = vec![
+            serde_json::json!({"key": "eq_mode", "type": "enum", "values": ["simple", "multi"]}),
+        ];
+        for (i, name) in ["low", "mid", "high"].iter().enumerate() {
+            simple_controls.push(slider(
+                &format!("simple_bands.{i}.freq_hz"),
+                FREQ_MIN,
+                FREQ_MAX,
+                1.0,
+                "Hz",
+            ));
+            simple_controls.push(slider(
+                &format!("simple_bands.{i}.gain_db"),
+                GAIN_MIN,
+                GAIN_MAX,
+                0.5,
+                "dB",
+            ));
+            simple_controls.push(slider(
+                &format!("simple_bands.{i}.q"),
+                Q_MIN,
+                Q_MAX,
+                0.1,
+                "",
+            ));
+            simple_controls.last_mut().unwrap()["label"] = serde_json::json!(name);
+        }
+        serde_json::json!({
+            "version": 1,
+            "groups": [
+                {"name": "master", "controls": [
+                    tog("bypass"),
+                    slider("preamp_db", PREAMP_MIN, PREAMP_MAX, 0.5, "dB"),
+                    tog("limiter"),
+                ]},
+                {"name": "boosts", "controls": boost_controls},
+                {"name": "fx", "controls": fx_controls},
+                {"name": "eq_simple", "controls": simple_controls},
+                {"name": "eq_multi", "controls": [
+                    {"key": "multi_bands", "type": "band_count", "min": MULTI_BANDS_MIN, "max": MULTI_BANDS_MAX},
+                    slider("multi_bands.[].freq_hz", FREQ_MIN, FREQ_MAX, 1.0, "Hz"),
+                    slider("multi_bands.[].gain_db", GAIN_MIN, GAIN_MAX, 0.5, "dB"),
+                    slider("multi_bands.[].q", Q_MIN, Q_MAX, 0.1, ""),
+                ]},
+            ]
+        })
+    }
 }
 
 // ---------- config / preset paths ----------
@@ -274,11 +451,10 @@ fn validate_preset_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
         return Err("preset name must be 1-64 chars".into());
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("preset name may only contain [A-Za-z0-9_-]".into());
+    if name.starts_with('.') || name.contains(['/', '\\']) || name.chars().any(|c| c.is_control()) {
+        return Err(
+            "preset name may not start with '.' or contain path separators/control chars".into(),
+        );
     }
     Ok(())
 }
@@ -314,12 +490,47 @@ pub fn save_preset(name: &str, settings: &Settings) -> Result<(), String> {
 pub fn load_preset(name: &str) -> Result<Settings, String> {
     validate_preset_name(name)?;
     let path = presets_dir().join(format!("{name}.toml"));
-    if !path.exists() {
-        return Err(format!("preset '{name}' not found"));
+    if path.exists() {
+        let mut s = load_settings(&path);
+        s.sanitize();
+        return Ok(s);
     }
-    let mut s = load_settings(&path);
-    s.sanitize();
-    Ok(s)
+    // user preset missing: fall back to the shipped FxSound factory presets
+    crate::factory::load(name).ok_or_else(|| format!("preset '{name}' not found"))
+}
+
+/// Delete a user preset; built-in factory presets stay protected
+/// (a user file shadowing a factory name is removed normally).
+pub fn delete_preset(name: &str) -> Result<(), String> {
+    validate_preset_name(name)?;
+    let path = presets_dir().join(format!("{name}.toml"));
+    if path.exists() {
+        return std::fs::remove_file(&path).map_err(|e| e.to_string());
+    }
+    if crate::factory::load(name).is_some() {
+        return Err(format!("'{name}' is a built-in preset"));
+    }
+    Err(format!("preset '{name}' not found"))
+}
+
+/// Rename a user preset; built-in factory presets stay protected.
+pub fn rename_preset(from: &str, to: &str) -> Result<(), String> {
+    validate_preset_name(from)?;
+    validate_preset_name(to)?;
+    let src = presets_dir().join(format!("{from}.toml"));
+    if !src.exists() {
+        if crate::factory::load(from).is_some() {
+            return Err(format!(
+                "'{from}' is a built-in preset; save it under a new name first"
+            ));
+        }
+        return Err(format!("preset '{from}' not found"));
+    }
+    let dst = presets_dir().join(format!("{to}.toml"));
+    if dst.exists() {
+        return Err(format!("preset '{to}' already exists"));
+    }
+    std::fs::rename(&src, &dst).map_err(|e| e.to_string())
 }
 
 pub fn list_presets() -> Result<Vec<String>, String> {
@@ -333,6 +544,11 @@ pub fn list_presets() -> Result<Vec<String>, String> {
                     out.push(stem.to_string());
                 }
             }
+        }
+    }
+    for name in crate::factory::names() {
+        if !out.contains(&name) {
+            out.push(name);
         }
     }
     out.sort();
@@ -412,6 +628,53 @@ mod tests {
         assert!(save_preset("../evil", &Settings::default()).is_err());
         assert!(load_preset("../../etc/passwd").is_err());
         assert!(save_preset("", &Settings::default()).is_err());
+    }
+
+    #[test]
+    fn preset_names_allow_fxspell_names() {
+        assert!(validate_preset_name("Volume Boost").is_ok());
+        assert!(validate_preset_name("70's").is_ok());
+        assert!(validate_preset_name("R&B").is_ok());
+        assert!(validate_preset_name(".hidden").is_err());
+        assert!(validate_preset_name("a/b").is_err());
+        assert!(validate_preset_name("bad\\name").is_err());
+    }
+
+    #[test]
+    fn old_config_without_fx_fields_still_loads() {
+        let old = "bypass = false\npreamp_db = -3.0\nlimiter = true\neq_mode = \"simple\"\n\n[bass]\nenabled = true\ngain_db = 6.0\nfreq_hz = 150.0\n";
+        let s: Settings = toml::from_str(old).unwrap();
+        assert_eq!(s.preamp_db, -3.0);
+        assert!(s.bass.enabled);
+        assert_eq!(s.clarity, Fx::default());
+        assert_eq!(s.bass_boost, Fx::default());
+        assert_eq!(s.dynamic_boost, Fx::default());
+    }
+
+    #[test]
+    fn factory_presets_list_and_load() {
+        let list = list_presets().unwrap();
+        assert!(list.contains(&"General".to_string()));
+        assert!(list.contains(&"Music".to_string()));
+        let s = load_preset("General").unwrap();
+        assert!(s.clarity.enabled);
+        assert_eq!(s.clarity.amount, 39.0);
+    }
+
+    #[test]
+    fn describe_exposes_fx_schema() {
+        let d = Settings::describe();
+        let groups = d["groups"].as_array().unwrap();
+        let names: Vec<&str> = groups.iter().filter_map(|g| g["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["master", "boosts", "fx", "eq_simple", "eq_multi"]
+        );
+        let fx = &groups[2];
+        assert_eq!(fx["controls"].as_array().unwrap().len(), 10); // 5 effects x (toggle+slider)
+        let amount = &fx["controls"][1];
+        assert_eq!(amount["type"], "slider");
+        assert_eq!(amount["max"], 100.0);
     }
 
     #[test]
