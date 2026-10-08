@@ -1,7 +1,7 @@
 //! anonctl — command-line control for the anontokyo daemon.
 
 use anontokyo::ctl::{self, Request, Response};
-use anontokyo::settings::{BoostKind, EqMode, FxKind, Settings};
+use anontokyo::settings::{Band, Boost, BoostKind, EqMode, Fx, FxKind, Settings};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -265,6 +265,122 @@ fn summarize(s: &Settings) -> String {
     .to_string()
 }
 
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
+fn fmt_hz(v: f32) -> String {
+    if (v - v.round()).abs() > 0.01 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+fn fmt_boost(b: &Boost) -> String {
+    if b.enabled {
+        format!("{:+.1} dB @{} Hz", b.gain_db, fmt_hz(b.freq_hz))
+    } else {
+        "off".into()
+    }
+}
+
+fn fmt_fx(f: &Fx) -> String {
+    match (f.enabled, f.amount) {
+        (false, _) => "off".into(),
+        (true, a) if a <= 0.0 => "on".into(),
+        (true, a) => format!("{}%", a.round() as i32),
+    }
+}
+
+/// Human-friendly status block; `--json` still prints the raw payload.
+fn human_status(status: &serde_json::Value, presets: Option<&[String]>) -> String {
+    let settings: Settings = status
+        .get("settings")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let rate = status["format"]["rate"].as_u64().unwrap_or(0);
+    let ch = status["format"]["channels"].as_u64().unwrap_or(0);
+    let stages = status["active_stages"].as_u64().unwrap_or(0);
+    let word = if stages == 1 { "stage" } else { "stages" };
+
+    let mut out = format!("anontokyo · {rate} Hz · {ch} ch · {stages} {word} active");
+    if settings.bypass {
+        out.push_str(" · BYPASSED");
+    }
+    out.push_str(&format!(
+        "\n{:<8}bypass {} · preamp {:+.1} dB · limiter {}",
+        "master",
+        on_off(settings.bypass),
+        settings.preamp_db,
+        on_off(settings.limiter)
+    ));
+    out.push_str(&format!(
+        "\n{:<8}bass {} · vocal {} · treble {}",
+        "boosts",
+        fmt_boost(&settings.bass),
+        fmt_boost(&settings.vocal),
+        fmt_boost(&settings.treble)
+    ));
+    out.push_str(&format!(
+        "\n{:<8}clarity {} · surround {} · ambience {} · dynamic {} · bass {}",
+        "fx",
+        fmt_fx(&settings.clarity),
+        fmt_fx(&settings.surround),
+        fmt_fx(&settings.ambience),
+        fmt_fx(&settings.dynamic_boost),
+        fmt_fx(&settings.bass_boost)
+    ));
+    let eq = match settings.eq_mode {
+        EqMode::Simple => {
+            let sb = &settings.simple_bands;
+            if sb.len() >= 3 {
+                format!(
+                    "simple · low {:+.1} @{} Hz · mid {:+.1} @{} Hz · high {:+.1} @{} Hz",
+                    sb[0].gain_db,
+                    fmt_hz(sb[0].freq_hz),
+                    sb[1].gain_db,
+                    fmt_hz(sb[1].freq_hz),
+                    sb[2].gain_db,
+                    fmt_hz(sb[2].freq_hz)
+                )
+            } else {
+                "simple".into()
+            }
+        }
+        EqMode::Multi => {
+            let touched: Vec<(usize, &Band)> = settings
+                .multi_bands
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.gain_db.abs() > 0.01)
+                .collect();
+            if touched.is_empty() {
+                format!("multi · {} bands · flat", settings.multi_bands.len())
+            } else {
+                let shown: Vec<String> = touched
+                    .iter()
+                    .take(6)
+                    .map(|(i, b)| format!("m{i} {:+.1} @{} Hz", b.gain_db, fmt_hz(b.freq_hz)))
+                    .collect();
+                let more = if touched.len() > 6 { " …" } else { "" };
+                format!(
+                    "multi · {} bands · {} touched: {}{}",
+                    settings.multi_bands.len(),
+                    touched.len(),
+                    shown.join(" · "),
+                    more
+                )
+            }
+        }
+    };
+    out.push_str(&format!("\n{:<8}{}", "eq", eq));
+    if let Some(p) = presets {
+        out.push_str(&format!("\n{:<8}{}", "presets", p.len()));
+    }
+    out
+}
+
 fn report(cli: &Cli, resp: Response) -> Result<()> {
     if !resp.ok {
         bail!(resp.error.unwrap_or_else(|| "unknown daemon error".into()));
@@ -274,7 +390,12 @@ fn report(cli: &Cli, resp: Response) -> Result<()> {
         return Ok(());
     }
     if let Some(status) = &resp.status {
-        println!("{}", serde_json::to_string_pretty(status)?);
+        if status.get("settings").is_some() {
+            println!("{}", human_status(status, resp.presets.as_deref()));
+        } else {
+            // describe/schema payloads stay raw JSON
+            println!("{}", serde_json::to_string_pretty(status)?);
+        }
         return Ok(());
     }
     if let Some(settings) = &resp.settings {
@@ -291,6 +412,55 @@ fn report(cli: &Cli, resp: Response) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(settings: &Settings) -> serde_json::Value {
+        serde_json::json!({
+            "settings": settings,
+            "format": {"rate": 48000, "channels": 2},
+            "active_stages": 3,
+        })
+    }
+
+    #[test]
+    fn human_status_shows_every_section() {
+        let out = human_status(&payload(&Settings::default()), Some(&["General".into()]));
+        assert!(out.contains("48000 Hz · 2 ch · 3 stages active"), "{out}");
+        assert!(out.contains("master"), "{out}");
+        assert!(out.contains("boosts"), "{out}");
+        assert!(out.contains("fx"), "{out}");
+        assert!(out.contains("eq"), "{out}");
+        assert!(out.contains("presets 1"), "{out}");
+    }
+
+    #[test]
+    fn human_status_renders_fx_amounts_and_multi_eq() {
+        let mut s = Settings::default();
+        s.clarity = Fx::new(true, 25.0);
+        s.bass_boost = Fx::new(true, 0.0); // enabled at zero reads as "on"
+        s.eq_mode = EqMode::Multi;
+        s.multi_bands[0].gain_db = 2.0;
+        s.multi_bands[3].gain_db = -1.0;
+        let out = human_status(&payload(&s), None);
+        assert!(out.contains("clarity 25%"), "{out}");
+        assert!(out.contains("surround off"), "{out}");
+        assert!(out.contains("bass on"), "{out}");
+        assert!(out.contains("2 touched"), "{out}");
+        assert!(out.contains("m0 +2.0"), "{out}");
+        assert!(!out.contains("presets"), "{out}");
+    }
+
+    #[test]
+    fn bypass_marks_header() {
+        let mut s = Settings::default();
+        s.bypass = true;
+        let out = human_status(&payload(&s), None);
+        assert!(out.contains("BYPASSED"), "{out}");
+    }
 }
 
 fn main() -> Result<()> {

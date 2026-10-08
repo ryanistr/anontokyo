@@ -33,7 +33,8 @@ Wiring requirements learned the hard way (WirePlumber 0.5.18 policy):
 
 ## Control surface
 
-    anonctl status | --json status      live state (stages active, format, settings)
+    anonctl status                      formatted live state (stages, settings, presets)
+    anonctl --json status|describe       raw JSON for scripts/GUI builders
     anonctl bypass on|off               hard bypass (bit-exact passthrough)
     anonctl preamp --db -3              -12..+12 dB (negative values accepted)
     anonctl boost bass|vocal|treble --enable|--disable --gain -6 --freq 150 --q 0.7
