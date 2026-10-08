@@ -47,7 +47,7 @@ export component VerticalSlider inherits Rectangle {
         width: root.width;
         height: root.height;
         pointer-event(event) => {
-            if (root.enabled && (event.kind == PointerEventKind.down || event.kind == PointerEventKind.move)) {
+            if (root.enabled && event.kind == PointerEventKind.down) {
                 root.set_from_pointer();
             }
         }

@@ -175,6 +175,8 @@ export component MainWindow inherits MaterialWindow {
                     vertical_alignment: center;
                 }
                 menu_touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
                     clicked => { advanced.show(); }
                 }
             }
