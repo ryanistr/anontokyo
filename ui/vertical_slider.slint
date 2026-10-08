@@ -1,0 +1,58 @@
+// M3-styled vertical slider: minimum at the bottom, maximum at the top.
+import { MaterialPalette } from "@material";
+
+export component VerticalSlider inherits Rectangle {
+    in property <float> minimum: -12;
+    in property <float> maximum: 12;
+    in-out property <float> value: 0;
+    in property <bool> enabled: true;
+    callback value_changed(value: float);
+
+    property <float> span: max(root.maximum - root.minimum, 0.0001);
+    property <float> frac: (root.value - root.minimum) / root.span;
+
+    track := Rectangle {
+        x: (root.width - self.width) / 2;
+        width: 6px;
+        height: root.height;
+        border_radius: self.width / 2;
+        background: MaterialPalette.surface_container_highest;
+    }
+
+    active := Rectangle {
+        x: track.x;
+        y: track.y + track.height * (1.0 - root.frac);
+        width: track.width;
+        height: track.height * root.frac;
+        border_radius: self.width / 2;
+        background: MaterialPalette.primary;
+    }
+
+    handle := Rectangle {
+        x: track.x + track.width / 2 - self.width / 2;
+        y: (1.0 - root.frac) * (root.height - self.height);
+        width: 22px;
+        height: 12px;
+        border_radius: self.height / 2;
+        background: MaterialPalette.primary;
+    }
+
+    function set_from_pointer() {
+        let t = 1.0 - (touch.mouse-y / max(root.height - 1px, 1px));
+        root.value = root.minimum + clamp(t, 0.0, 1.0) * root.span;
+        root.value_changed(root.value);
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        pointer-event(event) => {
+            if (root.enabled && event.kind == PointerEventKind.down) {
+                root.set_from_pointer();
+            }
+        }
+        moved => {
+            if (root.enabled && self.pressed) { root.set_from_pointer(); }
+        }
+    }
+}

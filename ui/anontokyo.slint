@@ -1,15 +1,19 @@
-// AnonTokyo control panel — Material 3 via Slint's material component set.
+// AnonTokyo — landscape Material 3 control panel.
+// Main view: compact preset toolbar, spectrum visualizer, vertical EQ sliders.
+// Advanced controls (master/boosts/fx) live behind the right-side drawer.
 import {
-    FilledButton, ElevatedCard, OutlinedCard, Slider, Switch, DropDownMenu,
-    SegmentedButton, MenuItem, HorizontalDivider, SmallAppBar,
-    MaterialWindow, MaterialPalette, ScrollView, Horizontal,
+    ElevatedCard, OutlinedCard, Slider, Switch, DropDownMenu,
+    SegmentedButton, MenuItem, HorizontalDivider,
+    MaterialWindow, MaterialPalette, ScrollView, TextButton,
+    ModalDrawer, MaterialStyleMetrics, MaterialTypography,
 } from "@material";
 export { MaterialWindowAdapter } from "@material";
+import { VerticalSlider } from "./vertical_slider.slint";
 
 export component MainWindow inherits MaterialWindow {
     title: "AnonTokyo";
-    width: 460px;
-    height: 820px;
+    width: 1080px;
+    height: 640px;
 
     // Rust sets this while applying a status snapshot; widgets check it so
     // programmatic updates don't echo back as user events.
@@ -42,6 +46,18 @@ export component MainWindow inherits MaterialWindow {
     in property <[float]> band_gains: [];
     in property <[string]> band_labels: [];
 
+    in property <[float]> meter_levels: [];
+    in property <[string]> meter_labels: [];
+
+    // live bass/mid/treble levels for the app-bar logo (3 bars)
+    in property <[float]> logo_bars: [0.4, 0.4, 0.4];
+
+    // set by `anontokyo-ui --advanced` to open the drawer at launch
+    in property <bool> open_advanced;
+    changed open_advanced => {
+        if (root.open_advanced) { advanced.show(); }
+    }
+
     callback set_bypass(enabled: bool);
     callback set_limiter(enabled: bool);
     callback set_preamp(db: float);
@@ -56,126 +72,320 @@ export component MainWindow inherits MaterialWindow {
         padding: 0px;
         spacing: 0px;
 
-        SmallAppBar {
-            title: "AnonTokyo";
-            show_background: true;
+        // brand bar: spectrum logo mark + two-tone wordmark
+        Rectangle {
+            height: 64px;
+            background: MaterialPalette.surface_container;
+
+            logo := Rectangle {
+                x: MaterialStyleMetrics.padding_16;
+                y: (parent.height - self.height) / 2;
+                width: 36px;
+                height: 36px;
+                border_radius: MaterialStyleMetrics.border_radius_12;
+                background: MaterialPalette.primary_container;
+
+                HorizontalLayout {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    padding: MaterialStyleMetrics.padding_8;
+                    spacing: 3px;
+
+                    for bar in root.logo_bars : VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: end;
+                        Rectangle {
+                            height: 5px + bar * 15px;
+                            border_radius: 2px;
+                            background: MaterialPalette.on_primary_container;
+                            animate height {
+                                duration: 120ms;
+                                easing: ease-out;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                x: logo.x + logo.width + MaterialStyleMetrics.padding_12;
+                width: anon_t.width + tokyo_t.width;
+                height: parent.height;
+
+                anon_t := Text {
+                    text: "Anon";
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    color: MaterialPalette.on_surface;
+                    font_size: MaterialTypography.title_large.font_size;
+                    font_weight: MaterialTypography.medium;
+                }
+                tokyo_t := Text {
+                    text: "Tokyo";
+                    x: anon_t.width;
+                    y: (parent.height - self.height) / 2;
+                    color: MaterialPalette.primary;
+                    font_size: MaterialTypography.title_large.font_size;
+                    font_weight: MaterialTypography.semibold;
+                }
+            }
         }
 
-        ScrollView {
-            vertical-stretch: 1;
+        // ---- slim toolbar: presets, status, advanced menu ----
+        HorizontalLayout {
+            padding: MaterialStyleMetrics.padding_8;
+            padding-left: MaterialStyleMetrics.padding_16;
+            padding-right: MaterialStyleMetrics.padding_16;
+            spacing: MaterialStyleMetrics.padding_12;
+
+            DropDownMenu {
+                label: "Preset";
+                items: root.preset_items;
+                current_index: root.preset_index;
+                selected(index) => {
+                    if (!root.loading) { root.preset_selected(index); }
+                }
+            }
+            TextButton {
+                text: "Reload";
+                clicked => { root.reload_clicked(); }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+            }
+            Text {
+                text: root.status_text;
+                color: MaterialPalette.on_surface_variant;
+                font_size: MaterialTypography.label_medium.font_size;
+                font_weight: MaterialTypography.label_medium.font_weight;
+                vertical_alignment: center;
+            }
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border_radius: 20px;
+                background: menu_touch.has_hover
+                    ? MaterialPalette.secondary_container
+                    : transparent;
+                Text {
+                    text: "⋮";
+                    color: MaterialPalette.on_surface;
+                    font_size: 20px;
+                    horizontal_alignment: center;
+                    vertical_alignment: center;
+                }
+                menu_touch := TouchArea {
+                    clicked => { advanced.show(); }
+                }
+            }
+        }
+
+        // ---- main area ----
+        HorizontalLayout {
+            padding: MaterialStyleMetrics.padding_16;
+            spacing: MaterialStyleMetrics.padding_16;
 
             VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
+                horizontal-stretch: 1;
+                spacing: MaterialStyleMetrics.padding_16;
 
-                Text {
-                    text: root.status_text;
-                    color: MaterialPalette.on_surface_variant;
-                    font-size: 12px;
-                }
-
-                OutlinedCard {
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 12px;
-
-                        Text {
-                            text: "Presets";
-                            color: MaterialPalette.on_surface;
-                            font-size: 15px;
-                            font-weight: 600;
-                        }
-                        DropDownMenu {
-                            label: "Preset";
-                            items: root.preset_items;
-                            current_index: root.preset_index;
-                            selected(index) => {
-                                if (!root.loading) { root.preset_selected(index); }
-                            }
-                        }
-                        FilledButton {
-                            text: "Reload preset";
-                            clicked => { root.reload_clicked(); }
-                        }
-                    }
-                }
-
+                // spectrum visualizer
                 ElevatedCard {
+                    height: 190px;
                     VerticalLayout {
-                        padding: 16px;
-                        spacing: 12px;
+                        padding: MaterialStyleMetrics.padding_16;
+                        spacing: MaterialStyleMetrics.padding_8;
 
                         Text {
-                            text: "Master";
+                            text: "Spectrum";
                             color: MaterialPalette.on_surface;
-                            font-size: 15px;
+                            font-size: 14px;
                             font-weight: 600;
                         }
-                        Horizontal {
-                            spacing: 24px;
-                            Horizontal {
-                                spacing: 8px;
-                                Text {
-                                    text: "Bypass";
-                                    color: MaterialPalette.on_surface;
-                                    vertical-alignment: center;
-                                }
-                                Switch {
-                                    checked <=> root.bypass;
-                                    checked_state_changed(c) => {
-                                        if (!root.loading) { root.set_bypass(c); }
-                                    }
-                                }
-                            }
-                            Horizontal {
-                                spacing: 8px;
-                                Text {
-                                    text: "Limiter";
-                                    color: MaterialPalette.on_surface;
-                                    vertical-alignment: center;
-                                }
-                                Switch {
-                                    checked <=> root.limiter;
-                                    checked_state_changed(c) => {
-                                        if (!root.loading) { root.set_limiter(c); }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            for level[i] in root.meter_levels : VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: end;
+                                Rectangle {
+                                    height: level * 105px;
+                                    background: MaterialPalette.primary;
+                                    border_radius: MaterialStyleMetrics.border_radius_4;
+                                    animate height {
+                                        duration: 70ms;
                                     }
                                 }
                             }
                         }
-                        HorizontalDivider {}
-                        Text {
-                            text: "Preamp " + Math.round(root.preamp_db) + " dB";
-                            color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
-                        }
-                        Slider {
-                            minimum: -24;
-                            maximum: 24;
-                            value: root.preamp_db;
-                            value_changed(v) => {
-                                if (!root.loading) { root.set_preamp(v); }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            for label[i] in root.meter_labels : Text {
+                                horizontal-stretch: 1;
+                                text: label;
+                                color: MaterialPalette.on_surface_variant;
+                                font-size: 10px;
+                                horizontal_alignment: center;
                             }
                         }
                     }
                 }
 
+                // equalizer: bottom-to-top sliders
                 OutlinedCard {
+                    vertical-stretch: 1;
                     VerticalLayout {
-                        padding: 16px;
-                        spacing: 12px;
+                        padding: MaterialStyleMetrics.padding_16;
+                        spacing: MaterialStyleMetrics.padding_12;
 
-                        Text {
-                            text: "Boosts";
-                            color: MaterialPalette.on_surface;
-                            font-size: 15px;
-                            font-weight: 600;
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_12;
+
+                            Text {
+                                text: "Equalizer";
+                                color: MaterialPalette.on_surface;
+                                font-size: 14px;
+                                font-weight: 600;
+                                horizontal-stretch: 1;
+                                vertical_alignment: center;
+                            }
+                            SegmentedButton {
+                                items: [
+                                    { text: "Simple" },
+                                    { text: "Multi" },
+                                ];
+                                current_index: root.eq_mode;
+                                index_changed(i) => {
+                                    if (!root.loading) { root.set_eq_mode(i); }
+                                }
+                            }
                         }
-                        Horizontal {
-                            spacing: 8px;
+
+                        HorizontalDivider {}
+
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
+
+                            for band_label[i] in root.band_labels : VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: MaterialStyleMetrics.padding_4;
+
+                                Text {
+                                    text: (root.band_gains[i] > 0 ? "+" : "")
+                                        + Math.round(root.band_gains[i] * 10) / 10;
+                                    color: MaterialPalette.on_surface_variant;
+                                    font_size: MaterialTypography.label_small.font_size;
+                                    font_weight: MaterialTypography.label_small.font_weight;
+                                    horizontal_alignment: center;
+                                }
+                                VerticalSlider {
+                                    vertical-stretch: 1;
+                                    minimum: -12;
+                                    maximum: 12;
+                                    value: root.band_gains[i];
+                                    value_changed(v) => {
+                                        if (!root.loading) { root.set_band_gain(i, v); }
+                                    }
+                                }
+                                Text {
+                                    text: band_label;
+                                    color: MaterialPalette.on_surface_variant;
+                                    font_size: MaterialTypography.label_small.font_size;
+                                    horizontal_alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- advanced controls behind the menu ----
+        advanced := ModalDrawer {
+            position_right: true;
+            title: "Advanced";
+
+            ScrollView {
+                height: root.height - MaterialStyleMetrics.size_56
+                    - MaterialStyleMetrics.padding_24;
+
+                VerticalLayout {
+                    spacing: MaterialStyleMetrics.padding_12;
+                    padding: MaterialStyleMetrics.padding_4;
+
+                    Text {
+                        text: "Master";
+                        color: MaterialPalette.on_surface;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_24;
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
+                            Text {
+                                text: "Bypass";
+                                color: MaterialPalette.on_surface;
+                                vertical_alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Switch {
+                                checked <=> root.bypass;
+                                checked_state_changed(c) => {
+                                    if (!root.loading) { root.set_bypass(c); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
+                            Text {
+                                text: "Limiter";
+                                color: MaterialPalette.on_surface;
+                                vertical_alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Switch {
+                                checked <=> root.limiter;
+                                checked_state_changed(c) => {
+                                    if (!root.loading) { root.set_limiter(c); }
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Preamp " + Math.round(root.preamp_db) + " dB";
+                        color: MaterialPalette.on_surface_variant;
+                        font-size: 13px;
+                    }
+                    Slider {
+                        minimum: -24;
+                        maximum: 24;
+                        value: root.preamp_db;
+                        value_changed(v) => {
+                            if (!root.loading) { root.set_preamp(v); }
+                        }
+                    }
+
+                    HorizontalDivider {}
+
+                    Text {
+                        text: "Boosts";
+                        color: MaterialPalette.on_surface;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_24;
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
                             Text {
                                 text: "Bass boost";
                                 color: MaterialPalette.on_surface;
-                                vertical-alignment: center;
+                                vertical_alignment: center;
                                 horizontal-stretch: 1;
                             }
                             Switch {
@@ -185,12 +395,12 @@ export component MainWindow inherits MaterialWindow {
                                 }
                             }
                         }
-                        Horizontal {
-                            spacing: 8px;
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
                             Text {
                                 text: "Vocal boost";
                                 color: MaterialPalette.on_surface;
-                                vertical-alignment: center;
+                                vertical_alignment: center;
                                 horizontal-stretch: 1;
                             }
                             Switch {
@@ -200,12 +410,12 @@ export component MainWindow inherits MaterialWindow {
                                 }
                             }
                         }
-                        Horizontal {
-                            spacing: 8px;
+                        HorizontalLayout {
+                            spacing: MaterialStyleMetrics.padding_8;
                             Text {
                                 text: "Treble boost";
                                 color: MaterialPalette.on_surface;
-                                vertical-alignment: center;
+                                vertical_alignment: center;
                                 horizontal-stretch: 1;
                             }
                             Switch {
@@ -216,181 +426,172 @@ export component MainWindow inherits MaterialWindow {
                             }
                         }
                     }
-                }
 
-                ElevatedCard {
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
+                    HorizontalDivider {}
 
+                    Text {
+                        text: "FxSound FX";
+                        color: MaterialPalette.on_surface;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_12;
                         Text {
-                            text: "FxSound FX";
+                            text: "Clarity";
                             color: MaterialPalette.on_surface;
-                            font-size: 15px;
-                            font-weight: 600;
+                            width: 84px;
+                            vertical_alignment: center;
                         }
-
                         Text {
-                            text: "Clarity " + Math.round(root.fx_clarity);
+                            text: Math.round(root.fx_clarity);
                             color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
+                            width: 32px;
+                            horizontal_alignment: end;
+                            vertical_alignment: center;
                         }
-                        Horizontal {
-                            spacing: 12px;
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 100;
-                                value: root.fx_clarity;
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_fx(0, root.fx_clarity_on, v); }
-                                }
-                            }
-                            Switch {
-                                checked <=> root.fx_clarity_on;
-                                checked_state_changed(c) => {
-                                    if (!root.loading) { root.set_fx(0, c, root.fx_clarity); }
-                                }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.fx_clarity;
+                            value_changed(v) => {
+                                if (!root.loading) { root.set_fx(0, root.fx_clarity_on, v); }
                             }
                         }
-
-                        Text {
-                            text: "Surround " + Math.round(root.fx_surround);
-                            color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
-                        }
-                        Horizontal {
-                            spacing: 12px;
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 100;
-                                value: root.fx_surround;
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_fx(1, root.fx_surround_on, v); }
-                                }
-                            }
-                            Switch {
-                                checked <=> root.fx_surround_on;
-                                checked_state_changed(c) => {
-                                    if (!root.loading) { root.set_fx(1, c, root.fx_surround); }
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Ambience " + Math.round(root.fx_ambience);
-                            color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
-                        }
-                        Horizontal {
-                            spacing: 12px;
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 100;
-                                value: root.fx_ambience;
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_fx(2, root.fx_ambience_on, v); }
-                                }
-                            }
-                            Switch {
-                                checked <=> root.fx_ambience_on;
-                                checked_state_changed(c) => {
-                                    if (!root.loading) { root.set_fx(2, c, root.fx_ambience); }
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Dynamic boost " + Math.round(root.fx_dynamic);
-                            color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
-                        }
-                        Horizontal {
-                            spacing: 12px;
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 100;
-                                value: root.fx_dynamic;
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_fx(3, root.fx_dynamic_on, v); }
-                                }
-                            }
-                            Switch {
-                                checked <=> root.fx_dynamic_on;
-                                checked_state_changed(c) => {
-                                    if (!root.loading) { root.set_fx(3, c, root.fx_dynamic); }
-                                }
-                            }
-                        }
-
-                        Text {
-                            text: "Bass boost " + Math.round(root.fx_bassboost);
-                            color: MaterialPalette.on_surface_variant;
-                            font-size: 13px;
-                        }
-                        Horizontal {
-                            spacing: 12px;
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 100;
-                                value: root.fx_bassboost;
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_fx(4, root.fx_bassboost_on, v); }
-                                }
-                            }
-                            Switch {
-                                checked <=> root.fx_bassboost_on;
-                                checked_state_changed(c) => {
-                                    if (!root.loading) { root.set_fx(4, c, root.fx_bassboost); }
-                                }
+                        Switch {
+                            checked <=> root.fx_clarity_on;
+                            checked_state_changed(c) => {
+                                if (!root.loading) { root.set_fx(0, c, root.fx_clarity); }
                             }
                         }
                     }
-                }
 
-                OutlinedCard {
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
-
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_12;
                         Text {
-                            text: "Equalizer";
+                            text: "Surround";
                             color: MaterialPalette.on_surface;
-                            font-size: 15px;
-                            font-weight: 600;
+                            width: 84px;
+                            vertical_alignment: center;
                         }
-                        SegmentedButton {
-                            items: [
-                                { text: "Simple" },
-                                { text: "Multi" },
-                            ];
-                            current_index: root.eq_mode;
-                            index_changed(i) => {
-                                if (!root.loading) { root.set_eq_mode(i); }
+                        Text {
+                            text: Math.round(root.fx_surround);
+                            color: MaterialPalette.on_surface_variant;
+                            width: 32px;
+                            horizontal_alignment: end;
+                            vertical_alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.fx_surround;
+                            value_changed(v) => {
+                                if (!root.loading) { root.set_fx(1, root.fx_surround_on, v); }
                             }
                         }
-                        HorizontalDivider {}
-                        for band_label[i] in root.band_labels : Horizontal {
-                            spacing: 12px;
-                            Text {
-                                text: band_label;
-                                color: MaterialPalette.on_surface_variant;
-                                font-size: 13px;
-                                width: 64px;
-                                vertical-alignment: center;
+                        Switch {
+                            checked <=> root.fx_surround_on;
+                            checked_state_changed(c) => {
+                                if (!root.loading) { root.set_fx(1, c, root.fx_surround); }
                             }
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: -12;
-                                maximum: 12;
-                                value: root.band_gains[i];
-                                value_changed(v) => {
-                                    if (!root.loading) { root.set_band_gain(i, v); }
-                                }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_12;
+                        Text {
+                            text: "Ambience";
+                            color: MaterialPalette.on_surface;
+                            width: 84px;
+                            vertical_alignment: center;
+                        }
+                        Text {
+                            text: Math.round(root.fx_ambience);
+                            color: MaterialPalette.on_surface_variant;
+                            width: 32px;
+                            horizontal_alignment: end;
+                            vertical_alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.fx_ambience;
+                            value_changed(v) => {
+                                if (!root.loading) { root.set_fx(2, root.fx_ambience_on, v); }
+                            }
+                        }
+                        Switch {
+                            checked <=> root.fx_ambience_on;
+                            checked_state_changed(c) => {
+                                if (!root.loading) { root.set_fx(2, c, root.fx_ambience); }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_12;
+                        Text {
+                            text: "Dynamic boost";
+                            color: MaterialPalette.on_surface;
+                            width: 84px;
+                            vertical_alignment: center;
+                        }
+                        Text {
+                            text: Math.round(root.fx_dynamic);
+                            color: MaterialPalette.on_surface_variant;
+                            width: 32px;
+                            horizontal_alignment: end;
+                            vertical_alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.fx_dynamic;
+                            value_changed(v) => {
+                                if (!root.loading) { root.set_fx(3, root.fx_dynamic_on, v); }
+                            }
+                        }
+                        Switch {
+                            checked <=> root.fx_dynamic_on;
+                            checked_state_changed(c) => {
+                                if (!root.loading) { root.set_fx(3, c, root.fx_dynamic); }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: MaterialStyleMetrics.padding_12;
+                        Text {
+                            text: "Bass boost";
+                            color: MaterialPalette.on_surface;
+                            width: 84px;
+                            vertical_alignment: center;
+                        }
+                        Text {
+                            text: Math.round(root.fx_bassboost);
+                            color: MaterialPalette.on_surface_variant;
+                            width: 32px;
+                            horizontal_alignment: end;
+                            vertical_alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: 100;
+                            value: root.fx_bassboost;
+                            value_changed(v) => {
+                                if (!root.loading) { root.set_fx(4, root.fx_bassboost_on, v); }
+                            }
+                        }
+                        Switch {
+                            checked <=> root.fx_bassboost_on;
+                            checked_state_changed(c) => {
+                                if (!root.loading) { root.set_fx(4, c, root.fx_bassboost); }
                             }
                         }
                     }

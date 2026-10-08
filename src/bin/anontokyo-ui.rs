@@ -1,6 +1,7 @@
 //! M3-styled Slint control panel; thin client over the daemon socket.
 
 use anontokyo::ctl::{self, Request, Response};
+use anontokyo::meter;
 use anontokyo::settings::{BoostKind, EqMode, FxKind};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
@@ -140,6 +141,9 @@ fn boost_kind(idx: i32) -> BoostKind {
 fn main() -> Result<(), slint::PlatformError> {
     env_logger::init();
     let ui = MainWindow::new()?;
+    if std::env::args().any(|a| a == "--advanced") {
+        ui.set_open_advanced(true);
+    }
 
     let preset_names: PresetNames = Rc::new(RefCell::new(Vec::new()));
     let names = preset_names.clone();
@@ -239,6 +243,19 @@ fn main() -> Result<(), slint::PlatformError> {
 
     refresh(&ui, &names);
 
+    // spectrum band labels: 24 log-spaced columns shared with the bars
+    let meter_labels: Vec<SharedString> = meter::band_freqs()
+        .iter()
+        .map(|&f| {
+            if f >= 1000.0 {
+                SharedString::from(format!("{:.1}k", f / 1000.0))
+            } else {
+                SharedString::from(format!("{:.0}", f))
+            }
+        })
+        .collect();
+    ui.set_meter_labels(ModelRc::new(VecModel::from(meter_labels)));
+
     // keep the panel in sync with daemon-side changes (other controllers)
     let timer = Timer::default();
     let weak = ui.as_weak();
@@ -249,6 +266,43 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = weak.upgrade() {
                 refresh(&ui, &names);
             }
+        },
+    );
+
+    // fast path for the visualizer; Meter requests stay at debug log level
+    let meter_timer = Timer::default();
+    let meter_weak = ui.as_weak();
+    meter_timer.start(
+        TimerMode::Repeated,
+        std::time::Duration::from_millis(60),
+        move || {
+            let Some(ui) = meter_weak.upgrade() else {
+                return;
+            };
+            let Ok(resp) = ctl::request(&Request::Meter) else {
+                return;
+            };
+            if !resp.ok {
+                return;
+            }
+            let Some(bands) = resp.status.as_ref().and_then(|s| s["bands"].as_array()) else {
+                return;
+            };
+            let levels: Vec<f32> = bands
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .map(|v| v as f32)
+                .collect();
+            if levels.len() == meter::METER_BANDS {
+                let avg = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+                let logo = vec![
+                    avg(&levels[0..4]),
+                    avg(&levels[10..14]),
+                    avg(&levels[20..24]),
+                ];
+                ui.set_logo_bars(ModelRc::new(VecModel::from(logo)));
+            }
+            ui.set_meter_levels(ModelRc::new(VecModel::from(levels)));
         },
     );
 
