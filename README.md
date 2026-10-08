@@ -53,6 +53,20 @@ Chain order: preamp -> clarity -> bass-boost slider -> bass -> vocal -> treble
 (knee 0.85, ceiling 0.999 = -0.009 dBFS). DSP: RBJ Audio-EQ-Cookbook biquads,
 f64 coefficients / f32 samples, lock-free settings swap via arc-swap.
 
+## GUI (baseline)
+
+`anontokyo-ui` is a Material 3 control panel built with
+[Slint](https://slint.dev) and the official Slint material component set
+(vendored in `ui/material-1.1.0/`, MIT). It is a thin client of the same
+unix-socket protocol the CLI uses: presets, master (bypass/limiter/preamp),
+boost toggles, all five fx sliders and the simple/multi EQ, polling a status
+snapshot every 500 ms so daemon-side changes show up live.
+
+The GUI is optional — daemon and CLI builds do not pull in Slint:
+
+    cargo build --release --features gui   # builds anontokyo-ui too
+    target/release/anontokyo-ui
+
 ## FxSound-style effects
 
 Five continuous 0..100 sliders that stack with (never replace) the three boost

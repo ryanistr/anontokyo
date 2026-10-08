@@ -18,6 +18,20 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 ctrlc = "3"
+slint = { version = "1.18", optional = true }
+
+[build-dependencies]
+slint-build = { version = "1.18", optional = true }
+
+[features]
+default = []
+# the M3 GUI (anontokyo-ui) pulls in Slint; daemon/CLI builds stay light
+gui = ["dep:slint", "dep:slint-build"]
+
+[[bin]]
+name = "anontokyo-ui"
+path = "src/bin/anontokyo-ui.rs"
+required-features = ["gui"]
 
 [profile.release]
 opt-level = 3
